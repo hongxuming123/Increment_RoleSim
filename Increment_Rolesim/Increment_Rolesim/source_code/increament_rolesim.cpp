@@ -1,0 +1,537 @@
+#include "increament_rolesim.h"
+#include "getsharedpath.h"
+#include "dymatch.h"
+#include <ctime>
+
+vector<vector<double>> Incremental_Rolesim(vector<vector<int>>& G, double beta, int k)
+{
+	int n = G.size();
+	vector<vector<double>> H1(n, vector<double>(n, 1.0));
+	vector<vector<double>> H2(n, vector<double>(n, 1.0));
+	/*
+	vector<vector<int>> nei;
+	for (int i = 0; i < n; ++i) { //计算每个节点的入邻居集合
+		vector<int> tmp;
+		for (int j = 0; j < n; ++j) {
+			if (i == j) continue;
+			if (G[i][j] == 1)
+				tmp.push_back(j);
+		}
+		nei.push_back(tmp);
+	}
+	
+	pathnode* root = getsharepath(G, nei);
+	*/
+
+	pathnode* root = getsharepath(G);
+
+	dfs_init_v_common_index(root);
+	for (int i = 0; i < k; ++i) {
+		if (i % 2 == 0) {
+			Iterative(root, G, H1, H2, beta);
+		}
+		else {
+			Iterative(root, G, H2, H1, beta);
+		}
+		
+	}
+	freeupspace(root);
+
+	if (k % 2 == 1) {
+		return H2;
+	}
+	return H1;
+}
+
+void dfs_init_v_common_index(pathnode* root) {
+	if (root == nullptr)
+		return;
+	if (root->val == 0) {
+		// empty set,do nothing
+		root->common_size = root->commom.size();
+		root->diff_size = root->diff.size();
+	}
+	else if (root->fa->val == 0) {//first level the in tree,record the sequence of node
+		root->common_size = root->commom.size();
+		root->diff_size = root->diff.size();
+		root->nodes_seq = new int[root->diff.size()];
+		set<int>::iterator it;
+		int x = 0;
+		for (it = root->diff.begin(); it != root->diff.end(); ++it) {//先暂时用一下set<int> common和diff,到时候在建立树的过程中初始化好nodes_seq等信息
+			root->nodes_seq[x++] = *it;
+		}
+	}
+	else {
+		root->common_size = root->commom.size();
+		root->diff_size = root->diff.size();
+		unordered_map<int, int> node_to_idx;
+		for (int i = 0; i < root->fa->commom.size() + root->fa->diff.size(); ++i) {
+			node_to_idx[root->fa->nodes_seq[i]] = i;
+		}
+		root->nodes_seq = new int[root->diff.size() + root->commom.size()];
+		root->index = new int[root->commom.size()];
+		set<int>::iterator it;
+		int x = 0;
+		for (it = root->commom.begin(); it != root->commom.end(); ++it) {
+			root->nodes_seq[x] = *it;
+			root->index[x] = node_to_idx[*it]; //get common elem in father's index
+			++x;
+		}
+		for (it = root->diff.begin(); it != root->diff.end(); ++it) {
+			root->nodes_seq[x++] = *it;
+		}
+	}
+	for (int i = 0; i < root->nexts.size(); ++i) {
+		dfs_init_v_common_index(root->nexts[i]);
+	}
+}
+
+int create_first_level(Mi* mcptr, pathnode* curent_node, int uid, vector<vector<int>>& nei, vector<vector<double>>& Ha){
+	int vid = curent_node->val - 1;
+	int Nu = nei[uid].size(), Nv = nei[vid].size();
+	int mcdim = max(Nu, Nv);
+	mcptr->dim = mcdim;
+	mcptr->cost = new double* [mcdim];
+	for (int i = 0; i < mcdim; ++i) mcptr->cost[i] = new double[mcdim];
+	mcptr->rowsol = new int[mcdim];
+	mcptr->colsol = new int[mcdim];
+	mcptr->u = new double[mcdim];
+	mcptr->v = new double[mcdim];
+
+	for (int j = 0; j < Nv; ++j) {
+		int jj = curent_node->nodes_seq[j];
+		for (int i = 0; i < Nu; ++i) {
+			mcptr->cost[i][j] = 1 - Ha[nei[uid][i]][jj];
+		}
+	}
+	if (Nv > Nu) {
+		for (int i = Nu; i < mcdim; ++i) {
+			for (int j = 0; j < mcdim; ++j) {
+				mcptr->cost[i][j] = 1.0;
+			}
+		}
+	}
+	if (Nv < Nu) {
+		for (int j = Nv; j < mcdim; ++j) {
+			for (int i = 0; i < mcdim; ++i) {
+				mcptr->cost[i][j] = 1.0;
+			}
+		}
+	}
+	int idx = curent_node->common_size;
+	return idx;
+}
+
+int create_v2(Mi* mfptr, Mi* mcptr, pathnode* curent_node, int uid, vector<vector<int>>& nei, vector<vector<double>>& Ha) {
+	int vid = curent_node->val - 1;
+	int Nu = nei[uid].size(), Nv = nei[vid].size();
+	int mcdim = max(mfptr->dim, Nv); // when Nv > mf.dim > Nu, mc.dim > mf.dim
+
+	//assigment space for current node(mc)
+	mcptr->dim = mcdim;
+	mcptr->cost = new double* [mcdim];
+	for (int i = 0; i < mcdim; ++i) mcptr->cost[i] = new double[mcdim];
+	mcptr->rowsol = new int[mcdim];
+	mcptr->colsol = new int[mcdim];
+	mcptr->u = new double[mcdim];
+	mcptr->v = new double[mcdim];
+
+	//Initialize the current node information
+	int mfdim = mfptr->dim;
+	for (int j = 0; j < curent_node->common_size; ++j) {
+		for (int i = 0; i < Nu; ++i) {
+			mcptr->cost[i][j] = mfptr->cost[i][curent_node->index[j]];
+		}
+		mcptr->v[j] = mfptr->v[curent_node->index[j]];
+		mcptr->colsol[j] = mfptr->colsol[curent_node->index[j]];
+		mcptr->rowsol[mcptr->colsol[j]] = j;
+	}
+
+	for (int j = curent_node->common_size; j < curent_node->common_size + curent_node->diff_size; ++j) {
+		for (int i = 0; i < Nu; ++i) {
+			mcptr->cost[i][j]= 1 - Ha[nei[uid][i]][curent_node->nodes_seq[j]];
+		}
+		mcptr->colsol[j] = -1;
+	}
+	for (int j = Nv; j < mcdim; ++j) {
+		mcptr->colsol[j] = -1;
+		for (int i = 0; i < Nu; ++i) {
+			mcptr->cost[i][j] = 1.0;
+		}
+	}
+
+	for (int i = Nu; i < mcdim; ++i) {
+		for (int j = 0; j < mcdim; ++j) {
+			mcptr->cost[i][j] = 1.0;
+		}
+	}
+
+	for (int i = 0; i < mfptr->dim; ++i) mcptr->u[i] = mfptr->u[i];
+
+	int idx = curent_node->common_size;
+	return idx;
+}
+
+void dfs_v2(int u, pathnode* root, vector<vector<int>>& nei, unordered_map<int, Mi*>& forlapjv, vector<vector<double>>& Ha, vector<vector<double>>& Hb, double beta)
+{
+	if (root == nullptr)
+		return;
+	Mi mc, * mcptr;
+	mcptr = &mc;
+	if (root->val == 0) {
+		mcptr->dim = 0;
+		forlapjv[0] = mcptr;
+	}
+	else if (root->fa->val == 0) {
+		int vid = root->val - 1;
+		int Nu = nei[u].size(), Nv = nei[vid].size();
+		create_first_level(mcptr, root, u, nei, Ha);
+		double weight = mcptr->dim - hungarian(mc.dim, mc.cost, mc.rowsol, mc.colsol, mc.u, mc.v);
+		//double weight = mcptr->dim - lap(mc.dim, mc.cost, mc.rowsol, mc.colsol, mc.u, mc.v);
+		forlapjv[vid + 1] = mcptr; // fixed u, store info of N(v)
+		
+		if (vid < Hb.size() && vid > -1) {
+			if (mcptr->dim == 0)
+				Hb[u][vid] = beta;
+			else
+				Hb[u][vid] = (1 - beta) * weight / max(Nu,Nv) + beta;
+		}
+
+	}
+	else {
+		Mi* mfptr = forlapjv[root->fa->val];
+		int f_dim = mfptr->dim;
+		int idx = create_v2(mfptr, mcptr, root, u, nei, Ha);
+
+		double weight = dymatch_col(f_dim, mcptr->dim, idx, mcptr->cost, mcptr->rowsol, mcptr->colsol, mcptr->u, mcptr->v);
+		//double weight = lap(mcptr->dim,mcptr->cost,mcptr->rowsol,mcptr->colsol, mcptr->u, mcptr->v);
+		weight = mc.dim - weight;
+		forlapjv[root->val] = &mc;
+		if (root->val <= Hb.size() && root->val > 0) {
+			int Nu = nei[u].size(), Nv = nei[root->val - 1].size();
+			int maxn = max(Nu, Nv);
+			if (maxn == 0)
+				Hb[u][root->val - 1] = beta;
+			else
+				Hb[u][root->val - 1] = (1 - beta) * weight / maxn + beta;
+		}
+	}
+	for (int i = 0; i < root->nexts.size(); ++i) {
+		dfs_v2(u, root->nexts[i], nei, forlapjv, Ha, Hb, beta);
+	}
+	if (root->val != 0) {
+		delete[] mc.colsol;
+		delete[] mc.rowsol;
+		delete[] mc.u;
+		delete[] mc.v;
+		for (int i = 0; i <mc.dim; ++i) {
+			delete[] mc.cost[i];
+		}
+		delete[] mc.cost;
+	}
+}
+
+void Iterative(pathnode* root, vector<vector<int>>& nei, vector<vector<double>>& Ha, vector<vector<double>>& Hb, double beta) {
+	int n = Ha.size();
+	for (int i = 0; i < n; ++i) {
+		unordered_map<int, Mi*> forlapjv;//在斯坦纳树的节点中每个节点所对应的lapjv所需变量
+		dfs_v2(i, root, nei, forlapjv, Ha, Hb, beta);
+	}
+}
+
+int create(Mi* mfptr, Mi* mcptr, pathnode* curent_node, int uid, vector<vector<int>>& nei, vector<vector<double>>& Ha) {
+	set<int>& comelem = curent_node->commom;
+	set<int>& diffelem = curent_node->diff;
+	
+	int vid = curent_node->val - 1;
+	int Nu = nei[uid].size(), Nv = nei[vid].size();
+	int mcdim = max(mfptr->dim, Nv); // when Nv > mf.dim > Nu, mc.dim > mf.dim
+
+	//assigment space for current node(mc)
+	mcptr->dim= mcdim;
+	mcptr->cost = new double* [mcdim];
+	for (int i = 0; i < mcdim; ++i) mcptr->cost[i] = new double[mcdim];
+	mcptr->rowsol = new int[mcdim];
+	mcptr->colsol = new int[mcdim];
+	mcptr->u = new double[mcdim];
+	mcptr->v = new double[mcdim];
+	mcptr->index = new int[mcdim];
+
+	//Initialize the current node information
+	int mfdim = mfptr->dim;
+	int x = 0;//x is mc column index in costmatrix
+	for (int j = 0; j < mfdim; ++j) {
+		int node = mfptr->index[j];
+		if (comelem.find(node) != comelem.end()) {
+			mcptr->index[x] = node;
+			for (int i = 0; i < Nu; ++i) {
+				mcptr->cost[i][x] = mfptr->cost[i][j];
+			}
+			mcptr->v[x] = mfptr->v[j];
+			mcptr->colsol[x] = mfptr->colsol[j];
+			mcptr->rowsol[mcptr->colsol[x]] = x;
+			++x;
+		}
+		else {
+			mcptr->rowsol[mfptr->colsol[j]] = -1; //let the row of mc's costmatrix become unmatchecd
+		}
+	}
+	set<int>::iterator it;
+	for (it = diffelem.begin(); it != diffelem.end(); ++it) {
+		int vn = *it; // v's neighbor
+		mcptr->index[x] = vn;
+		mcptr->colsol[x] = -1;
+		for (int i = 0; i < Nu; ++i) {
+			mcptr->cost[i][x] = 1 - Ha[nei[uid][i]][vn];
+		}
+		++x;
+	}
+	for (int i = x; i < mcdim; ++i) mcptr->colsol[i] = -1;
+
+	for (int i = 0; i < mfdim; ++i) //save mc.u from mf.u
+		mcptr->u[i] = mfptr->u[i];
+
+	
+	if (Nv < Nu) { //Fill the dummy node with 1.0
+		for (int i = Nv; i < mcdim; ++i) {
+			mcptr->index[i] = -1;
+			for (int j = 0; j < Nu; ++j) {
+				mcptr->cost[j][i] = 1.0;
+			}
+		}
+	}
+	for (int i = Nu; i < mcdim; ++i) {//patch the costmatrix into a square with 1.0
+		for (int j = 0; j < mcdim; ++j) {
+			mcptr->cost[i][j] = 1.0;
+		}
+	}
+
+	int idx = comelem.size();// divied the matched column and unmatched column in mc.cost
+	return idx;
+}
+
+void dfs(int u, pathnode* root, vector<vector<int>>& nei, unordered_map<int, Mi*>& forlapjv, vector<vector<double>>& Ha, vector<vector<double>>& Hb, double beta){
+	if (root == nullptr)
+		return;
+	Mi mc, *mcptr;
+	int N = 0;
+	mcptr = &mc;
+
+	if (root->val == 0) { //空集
+		mc.dim = 0;
+		forlapjv[0] = mcptr;
+		//cout << "u = " << u << " root->val = " << root->val << endl;
+	}
+	else if (root->fa->val == 0) {//此时是从空集过来的第一个点，需要执行第一次lapjv计算
+	//else{
+		//cout << "u = " << u << " root->val = " << root->val << endl;
+
+		int vid = root->val - 1;
+
+		int Nu = nei[u].size(), Nv = nei[vid].size();
+		N = max(Nu, Nv);
+
+		mc.dim = N;
+
+
+		// initilse mc.cost matrix to all 1s
+
+		mc.cost = new double* [N];
+		for (int i = 0; i < N; ++i) {
+			mc.cost[i] = new double[N];
+		}
+
+		/*for (int i = 0; i < N; ++i) {
+			for (int j = 0; j < N; ++j) {
+				mc.cost[i][j] = 1.0;
+			}
+		}*/
+
+
+		//double** nbr_uv_pad = new double* [N];
+		//for (int i = 0; i < N; ++i) {
+		//	nbr_uv_pad[i] = new double[N];
+		//}
+		//std::fill(nbr_uv_pad, nbr_uv_pad + N * N, 1.0);
+		//mc.cost = nbr_uv_pad;
+		mc.rowsol = new int[N];
+		mc.colsol = new int[N];
+		mc.u = new double[N];
+		mc.v = new double[N];
+		mc.index = new int[N];
+
+		//int* rowsol = new int[N]; // store sol for max matching (no use)
+
+		// initilse mc.cost matrix to s(x,y) for x in N(u) and y in N(v)
+		for (int j = 0; j < Nv; ++j) {
+			int jj = nei[vid][j];
+			for (int i = 0; i < Nu; ++i) {
+				mc.cost[i][j] = 1 - Ha[nei[u][i]][jj];
+			}
+			mc.index[j] = jj; //该列所对应的节点编号   index -> Nv
+		}
+		if (Nv > Nu) {
+			for (int i = Nu; i < N; ++i) {
+				for (int j = 0; j < N; ++j) {
+					mc.cost[i][j] = 1.0;
+				}
+			}
+		}
+		if (Nv < Nu) {
+			for (int j = Nv; j < N; ++j) {
+				for (int i = 0; i < N; ++i) {
+					mc.cost[i][j] = 1.0;
+				}
+			}
+		}
+				
+		// initilse  mc.index
+		for (int j = Nv; j < N; ++j) {
+			mc.index[j] = -1;
+		}
+		// N==0 ?
+
+		// use lapjv to comptue max weighted matching
+		//double weight = N - lap(N, mc.cost, mc.rowsol, mc.colsol, mc.u, mc.v);
+		double weight = N - hungarian(mc.dim, mc.cost, mc.rowsol, mc.colsol, mc.u, mc.v);
+		//cout << "weight = " << weight << endl;
+		
+		forlapjv[vid+1] = mcptr; // fixed u, store info of N(v)
+
+		if (vid < Hb.size() && vid > -1) {
+			if (vid == u)
+				Hb[u][vid] = 1;
+			else if (N == 0)
+				Hb[u][vid] = 0;
+			else
+				Hb[u][vid] = (1 - beta) * weight / N + beta;
+		}
+		//delete[] rowsol;
+	}
+	else {
+		Mi* mfptr = forlapjv[root->fa->val];
+		int f_dim = mfptr->dim;
+		int idx = create(mfptr, mcptr, root, u, nei, Ha);
+		
+		
+
+		/*
+		//cout << "u = " << u << " root->val = " << root->val << endl;
+		Mi mf = *(forlapjv[root->fa->val]);
+		
+		set<int>& comelem = root->commom;
+		set<int>& diffelem = root->diff;
+		int len = comelem.size() + diffelem.size();
+		mc.dim = max(mf.dim, len);
+		vector<int> common;  //相同的列
+		vector<vector<double>> diff;//v的不同的邻居组成的值
+		mc.index = new int [mc.dim];
+
+		N = mf.dim;
+
+		int x = 0;
+		for (int j = 0; j < N; ++j) {
+			int node = mf.index[j];
+			if (comelem.find(node) != comelem.end()) {
+				common.push_back(j);
+				mc.index[x++] = node;
+			}
+		}
+
+		//unordered_map<int, int>::iterator it;
+		//int x = 0;
+
+		//for (it = mf.index.begin(); it != mf.index.end(); ++it) {
+		//	int j = it->first, node = it->second;
+		//	if (comelem.find(node) != comelem.end()) {
+		//		common.push_back(j);
+		//		mc.index[x++] = node;
+		//	}
+		//}
+
+		set<int>::iterator its;
+		x = common.size();
+		for (its = diffelem.begin(); its != diffelem.end(); ++its) {
+			int vn = *its;
+			vector<double> tmp;
+			for (int i = 0; i < nei[u].size(); ++i) {
+				tmp.push_back(1 - Ha[nei[u][i]][vn]);
+			}
+			mc.index[x++] = vn;
+			diff.push_back(tmp);
+		}*/
+
+
+		
+		double weight = dymatch_col(f_dim, mcptr->dim, idx, mcptr->cost, mcptr->rowsol, mcptr->colsol, mcptr->u, mcptr->v);
+		weight = mc.dim - weight;
+		//cout << "weight = " << weight << endl;
+		//cout << "mc.dim = " << mc.dim << endl;
+		
+		//while (x < mc.dim) {
+			//mc.index[x++] = -1;
+		//}
+		forlapjv[root->val] = &mc;
+		if (root->val <= Hb.size() && root->val > 0) {
+			int Nu = nei[u].size(), Nv = nei[root->val - 1].size();
+			int maxn = max(Nu, Nv);
+			if (root->val - 1 == u)
+				Hb[u][root->val - 1] = 1;
+			else if (maxn == 0)
+				Hb[u][root->val - 1] = 0;
+			else
+				Hb[u][root->val - 1] = (1 - beta) * weight / maxn + beta;
+		}
+	}
+	
+	for (int i = 0; i < root->nexts.size(); ++i) {
+		dfs(u, root->nexts[i], nei, forlapjv, Ha, Hb, beta);
+	}
+	if (root->val != 0) {
+		delete[] mc.colsol;
+		delete[] mc.rowsol;
+		delete[] mc.u;
+		delete[] mc.v;
+		for (int i = 0; i < N; ++i) {
+			delete[] mc.cost[i];
+		}
+		delete[] mc.cost;
+		delete[] mc.index;
+	}
+}
+
+void freeupspace(pathnode* root) {
+	if (root == nullptr)
+		return;
+	
+	for (int i = 0; i < root->nexts.size(); ++i) {
+		freeupspace(root->nexts[i]);
+	}
+	//delete[] root->index;
+	//delete[] root->nodes_seq;
+	delete root;
+}
+
+void dfs2(pathnode* root){
+	if (root == nullptr)
+		return;
+	cout << "root->val = " << root->val << endl;
+	if (root->fa != nullptr)
+		cout << "root->fa->val = " << root->fa->val << endl;
+	set<int> com = root->commom, diff = root->diff;
+	set<int>::iterator it;
+	cout << "common elem: ";
+	for (it = com.begin(); it != com.end(); ++it) {
+		cout << *it << " ";
+	}
+	cout << endl;
+	cout << "diff elem: ";
+	for (it = diff.begin(); it != diff.end(); ++it) {
+		cout << *it << " ";
+	}
+	cout << endl;
+	cout << endl << endl;
+	for (int i = 0; i < root->nexts.size(); ++i) {
+		dfs2(root->nexts[i]);
+	}
+}
